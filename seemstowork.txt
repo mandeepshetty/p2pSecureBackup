@@ -1,0 +1,639 @@
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.io.PrintStream;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.UnknownHostException;
+import java.util.ArrayList;
+import java.util.Random;
+import java.util.Scanner;
+import java.util.StringTokenizer;
+
+class PeerWorker implements Runnable {
+
+	Socket client = null;
+
+	public PeerWorker(Socket temp, int port) throws UnknownHostException,
+			IOException {
+		client = temp;
+	}
+
+	void greedyRoute(CANMessage message) {
+		ObjectOutputStream out;
+		BufferedReader in;
+		InputStreamReader ir;	
+		try {
+			System.out.println("List of neighbours " + Peer.neighbours);
+
+			ArrayList<ArrayList<Double>> distanceMatrix = getDistanceMatrix(message.destination);
+
+			String nextHop = getNextHop(distanceMatrix);
+
+			System.out.println("Greedy route next hop is:" + nextHop);
+
+			String host[] = nextHop.split(":");
+
+			Socket socket = new Socket(host[0], Integer.parseInt(host[1]));
+
+			out = new ObjectOutputStream(socket.getOutputStream());
+
+			System.out.println("Sending greedily to " + nextHop
+					+ "and destination in message is "
+					+ message.destination.toString());
+
+			try {
+				Thread.sleep(5000);
+			} catch (InterruptedException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
+
+			out.writeObject(message);
+			out.close();
+
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
+	}
+
+	private String getNextHop(ArrayList<ArrayList<Double>> distanceMatrix) {
+		int x = 0, y = 0;
+		double min = Double.MAX_VALUE;
+		for (int i = 0; i < distanceMatrix.size(); i++) {
+
+			ArrayList<Double> direction = distanceMatrix.get(i);
+			for (int j = 0; j < direction.size(); j++) {
+				if (direction.get(j) < min) {
+					min = direction.get(j);
+					x = i;
+					y = j;
+				}
+			}
+		}
+
+		String nextHop = Peer.neighbours.get(x).get(y);
+		return nextHop;
+	}
+
+	private ArrayList<ArrayList<Double>> getDistanceMatrix(Point destination)
+			throws UnknownHostException, IOException {
+
+		CANMessage getDistance = new CANMessage("distance", Peer.CANid,
+				destination);
+
+		ObjectOutputStream out;
+		BufferedReader in;
+		InputStreamReader ir;
+		ArrayList<ArrayList<Double>> distanceMatrix = new ArrayList<ArrayList<Double>>();
+		for (int i = 0; i < Peer.neighbours.size(); i++) {
+
+			distanceMatrix.add(new ArrayList<Double>());
+
+			ArrayList<String> direction = Peer.neighbours.get(i);
+			if (direction.isEmpty())
+				continue;
+
+			for (int j = 0; j < direction.size(); j++) {
+
+				String neighbor = direction.get(j);
+
+				String host[] = neighbor.split(":");
+				
+				System.out.println("Fetching distance from " + host[0] + " at " + host[1] );
+				Socket socket = new Socket(host[0], Integer.parseInt(host[1]));
+
+				out = new ObjectOutputStream(socket.getOutputStream());
+
+				out.writeObject(getDistance);
+				
+
+				ir = new InputStreamReader(socket.getInputStream());
+				in = new BufferedReader(ir);
+
+				double reply = Double.parseDouble(in.readLine());
+				out.close();
+				in.close();
+				distanceMatrix.get(i).add(reply);
+				socket.close();
+			}
+
+		}
+		return distanceMatrix;
+	}
+
+	double getDistanceToPoint(Point destination) {
+		double distance = Peer.peerZone.getDistanceToPoint(destination);
+		return distance;
+	}
+
+	void InitiateNodeJoin(String node) {
+
+		ObjectOutputStream out;
+		try {
+
+			// Get new Zone
+			Zone newZone = null;
+			ArrayList<ArrayList<String>> neighboursToSend = new ArrayList<ArrayList<String>>();
+
+			int count = 0;
+
+			getCopyOfNeighbors(neighboursToSend);
+
+			if (Peer.peerZone.isZoneSquare()) {
+				newZone = Peer.peerZone.splitVertically();
+
+				// Clear all left neighbors.
+				neighboursToSend.get(0).clear();
+				// // Add self
+				neighboursToSend.get(0).add(Peer.CANid);
+
+				// Update this nodes right neighbors to remove it.
+				for (String neighbor : Peer.neighbours.get(2)) {
+
+					String host[] = neighbor.split(":");
+
+					Socket socket = new Socket(host[0],
+							Integer.parseInt(host[1]));
+
+					System.out.println("sending delete vert " + host[0]);
+					out = new ObjectOutputStream(socket.getOutputStream());
+
+					CANMessage message = new CANMessage("delete", Peer.CANid, 0);
+
+					out.writeObject(message);
+					out.close();
+				}
+
+				// Add new node to list of my neighbors on the right.
+				Peer.neighbours.get(2).clear();
+				Peer.neighbours.get(2).add(node);
+
+			} else {
+
+				newZone = Peer.peerZone.splitHorizontally();
+
+				// Clear all bottom neighbors.
+				neighboursToSend.get(3).clear();
+				// Add self as bottom neighbor
+				neighboursToSend.get(3).add(Peer.CANid);
+
+				// Update this nodes top neighbors to remove it.
+				for (String neighbor : Peer.neighbours.get(1)) {
+					String host[] = neighbor.split(":");
+
+					Socket socket = new Socket(host[0],
+							Integer.parseInt(host[1]));
+					System.out.println("sending delete to horiz " + host[0]);
+					out = new ObjectOutputStream(socket.getOutputStream());
+
+					CANMessage message = new CANMessage("delete", Peer.CANid, 3);
+
+					out.writeObject(message);
+					out.close();
+					System.out.println("sent horiz");
+
+				}
+
+				// Add new node to list of my neighbors on top
+				Peer.neighbours.get(1).clear();
+				Peer.neighbours.get(1).add(node);
+
+			}
+
+			String host[] = node.split(":");
+
+			Socket socket = new Socket(host[0], Integer.parseInt(host[1]));
+
+			ObjectOutputStream returnOut;
+			returnOut = new ObjectOutputStream(socket.getOutputStream());
+
+			// Send zone and neighbor list to new peer.
+
+			CANMessage welcome = new CANMessage("welcome", newZone,
+					neighboursToSend);
+
+			returnOut.writeObject(welcome);
+			returnOut.close();
+
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
+
+	}
+
+	private void getCopyOfNeighbors(
+			ArrayList<ArrayList<String>> neighboursToSend) {
+		for (int i = 0; i < Peer.neighbours.size(); i++) {
+
+			neighboursToSend.add(new ArrayList<String>());
+
+			ArrayList<String> direction = Peer.neighbours.get(i);
+			if (direction.isEmpty())
+				continue;
+
+			for (int j = 0; j < direction.size(); j++) {
+				neighboursToSend.get(i).add(direction.get(j));
+			}
+		}
+	}
+
+	void serviceMessage(CANMessage message) throws IOException {
+
+		// Peer wants to join
+		if (message.requestType.equals("join")) {
+			InitiateNodeJoin(message.source);
+		}
+
+		// Calculating distance for greedy routing.
+		else if (message.requestType.equals("distance")) {
+			double distance = getDistanceToPoint(message.destination);
+
+			PrintStream out = new PrintStream(client.getOutputStream());
+			out.println(distance);
+		}
+
+		// Updating neighbors
+		else if (message.requestType.equals("update")) {
+
+			System.out.println("Adding " + message.source + " to "
+					+ message.side);
+			if (!Peer.neighbours.get(message.side).contains(message.source))
+				Peer.neighbours.get(message.side).add(message.source);
+		}
+
+		// Deleting neighbors
+		else if (message.requestType.equals("delete")) {
+			System.out.println("Deleting " + message.source + " from "
+					+ message.side);
+			Peer.neighbours.get(message.side).remove(message.source);
+		}
+
+		else if (message.requestType.equals("welcome")) {
+			System.out.println("Join successfull. Fetching details...");
+			getJoinDetails(message);
+		}
+	}
+
+	private void getJoinDetails(CANMessage message) {
+		Peer.peerZone = (Zone) message.newZone;
+		Peer.neighbours = (ArrayList<ArrayList<String>>) message.neighbors;
+
+		Peer.isInCAN = true;
+		Peer.informNeighborsOfExistence();
+
+	}
+
+	private void processMessage(CANMessage message) throws IOException {
+		
+		
+		//Directly received messages
+		if (message.requestType.equals("update")
+				|| message.requestType.equals("delete")
+				|| message.requestType.equals("welcome")
+				|| message.requestType.equals("distance")) {
+			serviceMessage(message);
+		}
+
+		else if (Peer.peerZone.isPointInZone(message.destination)) {
+			serviceMessage(message);
+		}
+
+		else {
+			System.out.println("greedy route to point");
+			greedyRoute(message);
+		}
+
+	}
+
+	public void run() {
+
+		try {
+			if (client == null)
+				System.out.println("NULL MOTHERFUCKER!!");
+			else {
+				ObjectInputStream ipReader = new ObjectInputStream(
+						client.getInputStream());
+
+				// read CAN message from peer.
+				CANMessage message = (CANMessage) ipReader.readObject();
+
+				processMessage(message);
+			}
+		} catch (Exception exp) {
+			exp.printStackTrace();
+		}
+	}
+
+}
+
+class PeerBackground implements Runnable {
+
+	private ServerSocket listeningSocket = null;
+
+	PeerBackground(int portForCAN) throws IOException {
+		listeningSocket = new ServerSocket(portForCAN);
+	}
+
+	public void run() {
+		while (true) {
+			try {
+				Socket client = listeningSocket.accept();
+
+				// Start listening for CAN messages.
+				new Thread(new PeerWorker(client, Peer.portforCAN)).start();
+
+			} catch (Exception e) {
+				e.printStackTrace();
+			}
+			continue;
+		}
+	}
+
+}
+
+public class Peer {
+
+	public static Zone peerZone;
+	public static ArrayList<ArrayList<String>> neighbours = new ArrayList<ArrayList<String>>();;
+
+	public static int bootstrapPort;
+	public static int portforCAN = 8888;
+	public static String ip = null;
+
+	public static String CANid = null;
+	public static String bootStrap;
+	public static boolean isInCAN = false;
+
+	Peer(String bootStrap, int port) {
+		Peer.bootstrapPort = port;
+		Peer.bootStrap = bootStrap;
+
+		for (int i = 0; i < 4; i++) {
+			neighbours.add(new ArrayList<String>());
+		}
+
+		try {
+			ip = InetAddress.getLocalHost().toString().split("/")[1];
+		} catch (UnknownHostException e) {
+
+			e.printStackTrace();
+		}
+
+	}
+
+	private void sendJoinRequest(String response) throws UnknownHostException {
+
+		Point destination = getRandomPoint();
+
+		String ip = InetAddress.getLocalHost().toString().split("/")[1];
+
+		CANMessage message = new CANMessage("join", ip + ":"
+				+ String.valueOf(Peer.portforCAN), destination);
+
+		String host[] = response.split(":");
+
+		try {
+			// Create socket to entry point and specific port.
+			Socket socket = new Socket(host[0], Integer.parseInt(host[1]));
+
+			ObjectOutputStream output = new ObjectOutputStream(
+					socket.getOutputStream());
+
+			startListeningInCAN();
+
+			// Send out the join message.
+			output.writeObject(message);
+
+		} catch (Exception exp) {
+			exp.printStackTrace();
+		}
+
+	}
+
+	public static void informNeighborsOfExistence() {
+		System.out.println("Updating neihbours:");
+		System.out.println(Peer.neighbours);
+		ObjectOutputStream out = null;
+		for (int i = 0; i < Peer.neighbours.size(); i++) {
+			ArrayList<String> direction = Peer.neighbours.get(i);
+
+			for (int j = 0; j < direction.size(); j++) {
+				String neighbor = direction.get(j);
+				String host[] = neighbor.split(":");
+	
+				try {
+					Socket socket = new Socket(host[0], Integer.parseInt(host[1]));
+					out = new ObjectOutputStream(socket.getOutputStream());
+
+					System.out.println("Sending update to " + host[0] + " at "
+							+ host[1]);
+
+					CANMessage message = new CANMessage("update", Peer.CANid,
+							(i + 2) % 4);
+					out.writeObject(message);
+					out.close();
+					socket.close();
+					System.out.println("sent update");
+
+				} catch (NumberFormatException e) {
+					// TODO Auto-generated catch block
+					e.printStackTrace();
+				} catch (UnknownHostException e) {
+					// TODO Auto-generated catch block
+					e.printStackTrace();
+				} catch (IOException e) {
+					// TODO Auto-generated catch block
+					e.printStackTrace();
+				}
+
+			}
+		}
+
+	}
+
+	private Point getRandomPoint() {
+		Random r = new Random();
+		int x = r.nextInt(10);
+		int y = r.nextInt(10);
+
+		Point destination = new Point(x, y);
+		System.out.println("Headed to : " + destination.toString());
+		return destination;
+	}
+
+	private void joinCAN() {
+
+		// Get port peer is dedicating to CAN
+		int port = getPortForCAN();
+
+		Socket socketToServer = new Socket();
+		try {
+			socketToServer.connect(new InetSocketAddress(bootStrap,
+					Peer.bootstrapPort));
+		} catch (IOException e) {
+			System.out.println(e.getMessage() + " to bootstrap server.");
+			;
+		}
+
+		try {
+			InputStreamReader ipreader = new InputStreamReader(
+					socketToServer.getInputStream());
+			BufferedReader input = new BufferedReader(ipreader);
+			PrintStream output = new PrintStream(
+					socketToServer.getOutputStream());
+
+			// Send join request and send port the peer has dedicated to CAN.
+			output.println("join");
+			output.println(portforCAN);
+
+			// Wait for response.
+			String response = input.readLine();
+
+			// First peer in CAN
+			if (response.equals("owner")) {
+				// Assign full space.
+				Peer.peerZone = new Zone(new Point(0.0, 0.0), new Point(10.0,
+						10.0));
+
+				isInCAN = true;
+
+				startListeningInCAN();
+
+			} else if (response.equals("unrecognizedcommand"))
+				System.out.println("Server did not recognize command");
+			else {
+				// Got entry point into CAN
+				System.out.println("Entry point is: " + response);
+
+				sendJoinRequest(response);
+			}
+
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
+
+	}
+
+	private void startListeningInCAN() throws IOException {
+		new Thread(new PeerBackground(Peer.portforCAN)).start();
+	}
+
+	private int getPortForCAN() {
+		System.out.print("Port dedictaed to CAN : ");
+		Scanner in = new Scanner(System.in);
+		int port = in.nextInt();
+		Peer.portforCAN = port;
+
+		Peer.CANid = ip + ":" + String.valueOf(Peer.portforCAN);
+		return port;
+	}
+
+	private void viewDetails() {
+		System.out.println();
+		try {
+			System.out.println("Name:"
+					+ InetAddress.getLocalHost().getCanonicalHostName());
+		} catch (UnknownHostException e) {
+			e.printStackTrace();
+		}
+		System.out.println("Zone:" + Peer.peerZone.toString());
+
+		// Printing neighbor details
+		System.out.println("Neighbors:");
+		int count = 0;
+		for (ArrayList<String> direction : neighbours) {
+			if (!direction.isEmpty()) {
+				if (count == 0)
+					System.out.print("Left: ");
+				else if (count == 1)
+					System.out.print("Top:");
+				else if (count == 2)
+					System.out.print("Right: ");
+				else
+					System.out.print("Bottom: ");
+				System.out.println(direction);
+			}
+			count++;
+		}
+		System.out.println();
+
+	}
+
+	public void processCommand(String command) throws Exception {
+		StringTokenizer tokens = new StringTokenizer(command);
+
+		if (!tokens.hasMoreTokens())
+			throw new Exception("Invalid command");
+
+		String comm = tokens.nextToken();
+
+		// Check if already in can, else start join process.
+		if (comm.equalsIgnoreCase("join")) {
+			if (isInCAN)
+				throw new Exception("Already in CAN.");
+
+			joinCAN();
+
+		}
+
+		else {
+			if (!isInCAN)
+				throw new Exception("Need to join CAN first.");
+
+			if (comm.equalsIgnoreCase("view")) {
+				viewDetails();
+			}
+
+			else if (comm.equalsIgnoreCase("leave")) {
+				// call leave
+			}
+
+			else if (comm.equalsIgnoreCase("search")) {
+				String keyword = tokens.nextToken();
+				if (keyword.isEmpty() || keyword == null) {
+					throw new Exception("Keyword missing");
+				}
+				// Call search
+			}
+
+			else if (comm.equalsIgnoreCase("insert")) {
+				String keyword = tokens.nextToken();
+				if (keyword.isEmpty() || keyword == null) {
+					throw new Exception("Keyword missing");
+				}
+				// Call insert
+			}
+
+			else
+				throw new Exception("Invalid command");
+		}
+	}
+
+	public static void main(String[] args) {
+
+		// String serverName = "129.21.37.35";
+		// int port = 1954;
+		String serverName = args[0];
+		int port = Integer.parseInt(args[1]);
+
+		Peer thisPeer = new Peer(serverName, port);
+		while (true) {
+			try {
+				System.out.print("Enter command: ");
+				Scanner in = new Scanner(System.in);
+				String command = in.nextLine();
+
+				thisPeer.processCommand(command);
+			} catch (Exception e) {
+				System.out.println(e.getMessage());
+				continue;
+			}
+
+		}
+	}
+}

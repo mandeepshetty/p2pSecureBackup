@@ -1,0 +1,8 @@
+#! /bin/sh
+build(){
+eval "javac BootStrapServer.java"
+eval "echo Main-Class: BootStrap > MANIFEST.MF"
+eval "jar -cvmf MANIFEST.MF bootstrap.jar BootStrapServer.class WorkerThread.class"
+}
+
+nohup java -jar bootstrap.jar $1 &
